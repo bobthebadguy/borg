@@ -1,3 +1,4 @@
+import errno
 import hashlib
 import os
 import shutil
@@ -30,6 +31,7 @@ from ..helpers import popen_with_error_handling
 from ..helpers import dash_open
 from ..helpers import iter_separated
 from ..helpers import eval_escapes
+from ..helpers import safe_unlink
 
 from . import BaseTestCase, FakeInputs
 
@@ -223,7 +225,7 @@ class TestLocationWithoutEnv:
         monkeypatch.delenv('BORG_REPO', raising=False)
         test_pid = os.getpid()
         assert repr(Location('/some/path::archive{pid}')) == \
-            "Location(proto='file', user=None, host=None, port=None, path='/some/path', archive='archive{}')".format(test_pid)
+            f"Location(proto='file', user=None, host=None, port=None, path='/some/path', archive='archive{test_pid}')"
         location_time1 = Location('/some/path::archive{now:%s}')
         sleep(1.1)
         location_time2 = Location('/some/path::archive{now:%s}')
@@ -257,11 +259,11 @@ class TestLocationWithEnv:
         from borg.platform import hostname
         monkeypatch.setenv('BORG_REPO', 'ssh://user@host:1234/{hostname}')
         assert repr(Location('::archive')) == \
-            "Location(proto='ssh', user='user', host='host', port=1234, path='/{}', archive='archive')".format(hostname)
+            f"Location(proto='ssh', user='user', host='host', port=1234, path='/{hostname}', archive='archive')"
         assert repr(Location('::')) == \
-            "Location(proto='ssh', user='user', host='host', port=1234, path='/{}', archive=None)".format(hostname)
+            f"Location(proto='ssh', user='user', host='host', port=1234, path='/{hostname}', archive=None)"
         assert repr(Location()) == \
-            "Location(proto='ssh', user='user', host='host', port=1234, path='/{}', archive=None)".format(hostname)
+            f"Location(proto='ssh', user='user', host='host', port=1234, path='/{hostname}', archive=None)"
 
     def test_file(self, monkeypatch):
         monkeypatch.setenv('BORG_REPO', 'file:///some/path')
@@ -378,7 +380,7 @@ class MockArchive:
         self.id = id
 
     def __repr__(self):
-        return "{0}: {1}".format(self.id, self.ts.isoformat())
+        return f"{self.id}: {self.ts.isoformat()}"
 
 
 @pytest.mark.parametrize(
@@ -1133,3 +1135,32 @@ def test_iter_separated():
 def test_eval_escapes():
     assert eval_escapes('\\n\\0\\x23') == '\n\0#'
     assert eval_escapes('äç\\n') == 'äç\n'
+
+
+def test_safe_unlink_is_safe(tmpdir):
+    contents = b"Hello, world\n"
+    victim = tmpdir / 'victim'
+    victim.write_binary(contents)
+    hard_link = tmpdir / 'hardlink'
+    hard_link.mklinkto(victim)
+
+    safe_unlink(hard_link)
+
+    assert victim.read_binary() == contents
+
+
+def test_safe_unlink_is_safe_ENOSPC(tmpdir, monkeypatch):
+    contents = b"Hello, world\n"
+    victim = tmpdir / 'victim'
+    victim.write_binary(contents)
+    hard_link = tmpdir / 'hardlink'
+    hard_link.mklinkto(victim)
+
+    def os_unlink(_):
+        raise OSError(errno.ENOSPC, "Pretend that we ran out of space")
+    monkeypatch.setattr(os, "unlink", os_unlink)
+
+    with pytest.raises(OSError):
+        safe_unlink(hard_link)
+
+    assert victim.read_binary() == contents

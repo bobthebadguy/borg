@@ -105,6 +105,27 @@ class Statistics:
             'nfiles': self.nfiles,
         }
 
+    def as_raw_dict(self):
+        return {
+            'size': self.osize,
+            'csize': self.csize,
+            'nfiles': self.nfiles,
+            'size_parts': self.osize_parts,
+            'csize_parts': self.csize_parts,
+            'nfiles_parts': self.nfiles_parts,
+        }
+
+    @classmethod
+    def from_raw_dict(cls, **kw):
+        self = cls()
+        self.osize = kw['size']
+        self.csize = kw['csize']
+        self.nfiles = kw['nfiles']
+        self.osize_parts = kw['size_parts']
+        self.csize_parts = kw['csize_parts']
+        self.nfiles_parts = kw['nfiles_parts']
+        return self
+
     @property
     def osize_fmt(self):
         return format_file_size(self.osize, iec=self.iec)
@@ -177,7 +198,7 @@ class BackupOSError(Exception):
 
     def __str__(self):
         if self.op:
-            return '%s: %s' % (self.op, self.os_error)
+            return f'{self.op}: {self.os_error}'
         else:
             return str(self.os_error)
 
@@ -443,7 +464,7 @@ class Archive:
                 raise self.AlreadyExists(name)
             i = 0
             while True:
-                self.checkpoint_name = '%s.checkpoint%s' % (name, i and ('.%d' % i) or '')
+                self.checkpoint_name = '{}.checkpoint{}'.format(name, i and ('.%d' % i) or '')
                 if self.checkpoint_name not in manifest.archives:
                     break
                 i += 1
@@ -627,6 +648,17 @@ Utilization of max. archive size: {csize_max:.0%}
         self.cache.commit()
 
     def calc_stats(self, cache, want_unique=True):
+        # caching wrapper around _calc_stats which is rather slow for archives made with borg < 1.2
+        have_borg12_meta = self.metadata.get('nfiles') is not None
+        try:
+            stats = Statistics.from_raw_dict(**cache.pre12_meta[self.fpr])
+        except KeyError:  # not in pre12_meta cache
+            stats = self._calc_stats(cache, want_unique=want_unique)
+            if not have_borg12_meta:
+                cache.pre12_meta[self.fpr] = stats.as_raw_dict()
+        return stats
+
+    def _calc_stats(self, cache, want_unique=True):
         have_borg12_meta = self.metadata.get('nfiles') is not None
 
         if have_borg12_meta and not want_unique:
@@ -639,7 +671,8 @@ Utilization of max. archive size: {csize_max:.0%}
             archive_index = ChunkIndex()
             sync = CacheSynchronizer(archive_index)
             add(self.id)
-            pi = ProgressIndicatorPercent(total=len(self.metadata.items), msg='Calculating statistics... %3d%%',
+            pi = ProgressIndicatorPercent(total=len(self.metadata.items),
+                                          msg='Calculating statistics for archive %s ... %%3d%%%%' % self.name,
                                           msgid='archive.calc_stats')
             for id, chunk in zip(self.metadata.items, self.repository.get_many(self.metadata.items)):
                 pi.show(increase=1)
@@ -990,7 +1023,7 @@ Utilization of max. archive size: {csize_max:.0%}
             return 'source' not in item or not hardlinkable(item.mode) or item.source in hardlink_masters
 
         def is_hardlink_master(item):
-            return item.get('hardlink_master', True) and 'source' not in item
+            return item.get('hardlink_master', True) and 'source' not in item and hardlinkable(item.mode)
 
         def update_hardlink_masters(item1, item2):
             if is_hardlink_master(item1) or is_hardlink_master(item2):
@@ -1414,7 +1447,7 @@ class TarfileObjectProcessors:
     def create_helper(self, tarinfo, status=None, type=None):
         item = Item(path=make_path_safe(tarinfo.name), mode=tarinfo.mode | type,
                     uid=tarinfo.uid, gid=tarinfo.gid, user=tarinfo.uname or None, group=tarinfo.gname or None,
-                    mtime=tarinfo.mtime * 1000**3)
+                    mtime=safe_ns(int(tarinfo.mtime * 1000**3)))
         yield item, status
         # if we get here, "with"-block worked ok without error/exception, the item was processed ok...
         self.add_item(item, stats=self.stats)
@@ -1790,7 +1823,7 @@ class ArchiveChecker:
             chunks_healthy = item.chunks_healthy if has_chunks_healthy else chunks_current
             if has_chunks_healthy and len(chunks_current) != len(chunks_healthy):
                 # should never happen, but there was issue #3218.
-                logger.warning('{}: {}: Invalid chunks_healthy metadata removed!'.format(archive_name, item.path))
+                logger.warning(f'{archive_name}: {item.path}: Invalid chunks_healthy metadata removed!')
                 del item.chunks_healthy
                 has_chunks_healthy = False
                 chunks_healthy = chunks_current
@@ -1834,7 +1867,7 @@ class ArchiveChecker:
                 # if this is first repair, remember the correct chunk IDs, so we can maybe heal the file later
                 item.chunks_healthy = item.chunks
             if has_chunks_healthy and chunk_list == chunks_healthy:
-                logger.info('{}: {}: Completely healed previously damaged file!'.format(archive_name, item.path))
+                logger.info(f'{archive_name}: {item.path}: Completely healed previously damaged file!')
                 del item.chunks_healthy
             item.chunks = chunk_list
             if 'size' in item:
@@ -1869,7 +1902,7 @@ class ArchiveChecker:
                 logger.error(msg)
 
             def list_keys_safe(keys):
-                return ', '.join((k.decode(errors='replace') if isinstance(k, bytes) else str(k) for k in keys))
+                return ', '.join(k.decode(errors='replace') if isinstance(k, bytes) else str(k) for k in keys)
 
             def valid_item(obj):
                 if not isinstance(obj, StableDict):
@@ -1939,7 +1972,7 @@ class ArchiveChecker:
         with cache_if_remote(self.repository) as repository:
             for i, info in enumerate(archive_infos):
                 pi.show(i)
-                logger.info('Analyzing archive {} ({}/{})'.format(info.name, i + 1, num_archives))
+                logger.info(f'Analyzing archive {info.name} ({i + 1}/{num_archives})')
                 archive_id = info.id
                 if archive_id not in self.chunks:
                     logger.error('Archive metadata block is missing!')
@@ -1975,7 +2008,7 @@ class ArchiveChecker:
             unused = {id_ for id_, entry in self.chunks.iteritems() if entry.refcount == 0}
             orphaned = unused - self.possibly_superseded
             if orphaned:
-                logger.error('{} orphaned objects found!'.format(len(orphaned)))
+                logger.error(f'{len(orphaned)} orphaned objects found!')
                 self.error_found = True
             if self.repair and unused:
                 logger.info('Deleting %d orphaned and %d superseded objects...' % (

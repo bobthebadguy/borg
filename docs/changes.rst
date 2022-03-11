@@ -217,8 +217,9 @@ The best check that everything is ok is to run a dry-run extraction::
 Change Log
 ==========
 
-Version 1.2.0 (not released yet)
---------------------------------
+
+Version 1.2.0 (2022-02-22 22:02:22 :-)
+--------------------------------------
 
 Please note:
 
@@ -246,6 +247,9 @@ things can be recommended:
   in your repo caused by a borg 1.1 bug
 - run `borg check` again (now with borg 1.2.x) and check if there is anything
   special.
+- run `borg info` (with borg 1.2.x) to build the local pre12-meta cache (can
+  take significant time, but after that it will be fast) - for more details
+  see below.
 - check the compatibility notes (see below) and adapt your scripts, if needed.
 - if you run into any issues, please check the github issue tracker before
   posting new issues there or elsewhere.
@@ -292,6 +296,39 @@ Compatibility notes:
 - exit with 128 + signal number, #5161.
   if you have scripts expecting rc == 2 for a signal exit, you need to update
   them to check for >= 128.
+
+Fixes:
+
+- diff: reduce memory consumption, fix is_hardlink_master, #6295
+- compact: fix / improve freeable / freed space log output
+
+  - derive really freed space from quota use before/after, #5679
+  - do not say "freeable", but "maybe freeable" (based on hint, unsure)
+- fix race conditions in internal SaveFile function, #6306 #6028
+- implement internal safe_unlink (was: truncate_and_unlink) function more safely:
+  usually it does not truncate any more, only under "disk full" circumstances
+  and only if there is only one hardlink.
+  see: https://github.com/borgbackup/borg/discussions/6286
+
+Other changes:
+
+- info: use a pre12-meta cache to accelerate stats for borg < 1.2 archives.
+  the first time borg info is invoked on a borg 1.1 repo, it can take a
+  rather long time computing and caching some stats values for 1.1 archives,
+  which borg 1.2 archives have in their archive metadata structure.
+  be patient, esp. if you have lots of old archives.
+  following invocations are much faster due to the cache.
+  related change: add archive name to calc_stats progress display.
+- docs:
+
+  - add borg 1.2 upgrade notes, #6217
+  - link to borg placeholders and borg patterns help
+  - init: explain the encryption modes better
+  - clarify usage of patternfile roots
+  - put import-tar docs into same file as export-tar docs
+  - explain the difference between a path that ends with or without a slash,
+    #6297
+
 
 Version 1.2.0rc1 (2022-02-05)
 -----------------------------

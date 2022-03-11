@@ -44,7 +44,7 @@ try:
     from .cache import Cache, assert_secure, SecurityManager
     from .constants import *  # NOQA
     from .compress import CompressionSpec
-    from .crypto.key import key_creator, key_argument_names, tam_required_file, tam_required, RepoKey, PassphraseKey
+    from .crypto.key import key_creator, key_argument_names, tam_required_file, tam_required, RepoKey
     from .crypto.keymanager import KeyManager
     from .helpers import EXIT_SUCCESS, EXIT_WARNING, EXIT_ERROR, EXIT_SIGNAL_BASE
     from .helpers import Error, NoManifestError, set_ec
@@ -377,7 +377,7 @@ class Archiver:
                 else:
                     manager.export(args.path)
             except IsADirectoryError:
-                self.print_error("'{}' must be a file, not a directory".format(args.path))
+                self.print_error(f"'{args.path}' must be a file, not a directory")
                 return EXIT_ERROR
         return EXIT_SUCCESS
 
@@ -398,22 +398,6 @@ class Archiver:
                 self.print_error("input file does not exist: " + args.path)
                 return EXIT_ERROR
             manager.import_keyfile(args)
-        return EXIT_SUCCESS
-
-    @with_repository(manifest=False)
-    def do_migrate_to_repokey(self, args, repository):
-        """Migrate passphrase -> repokey"""
-        manifest_data = repository.get(Manifest.MANIFEST_ID)
-        key_old = PassphraseKey.detect(repository, manifest_data)
-        key_new = RepoKey(repository)
-        key_new.target = repository
-        key_new.repository_id = repository.id
-        key_new.enc_key = key_old.enc_key
-        key_new.enc_hmac_key = key_old.enc_hmac_key
-        key_new.id_key = key_old.id_key
-        key_new.chunk_seed = key_old.chunk_seed
-        key_new.change_passphrase()  # option to change key protection passphrase, save
-        logger.info('Key updated')
         return EXIT_SUCCESS
 
     def do_benchmark_crud(self, args):
@@ -590,26 +574,31 @@ class Archiver:
                     path = os.path.normpath(path)
                     parent_dir = os.path.dirname(path) or '.'
                     name = os.path.basename(path)
-                    # note: for path == '/':  name == '' and parent_dir == '/'.
-                    # the empty name will trigger a fall-back to path-based processing in os_stat and os_open.
-                    with OsOpen(path=parent_dir, flags=flags_root, noatime=True, op='open_root') as parent_fd:
-                        try:
-                            st = os_stat(path=path, parent_fd=parent_fd, name=name, follow_symlinks=False)
-                        except OSError as e:
-                            self.print_warning('%s: %s', path, e)
-                            continue
-                        if args.one_file_system:
-                            restrict_dev = st.st_dev
-                        else:
-                            restrict_dev = None
-                        self._rec_walk(path=path, parent_fd=parent_fd, name=name,
-                                       fso=fso, cache=cache, matcher=matcher,
-                                       exclude_caches=args.exclude_caches, exclude_if_present=args.exclude_if_present,
-                                       keep_exclude_tags=args.keep_exclude_tags, skip_inodes=skip_inodes,
-                                       restrict_dev=restrict_dev, read_special=args.read_special, dry_run=dry_run)
-                        # if we get back here, we've finished recursing into <path>,
-                        # we do not ever want to get back in there (even if path is given twice as recursion root)
-                        skip_inodes.add((st.st_ino, st.st_dev))
+                    try:
+                        # note: for path == '/':  name == '' and parent_dir == '/'.
+                        # the empty name will trigger a fall-back to path-based processing in os_stat and os_open.
+                        with OsOpen(path=parent_dir, flags=flags_root, noatime=True, op='open_root') as parent_fd:
+                            try:
+                                st = os_stat(path=path, parent_fd=parent_fd, name=name, follow_symlinks=False)
+                            except OSError as e:
+                                self.print_warning('%s: %s', path, e)
+                                continue
+                            if args.one_file_system:
+                                restrict_dev = st.st_dev
+                            else:
+                                restrict_dev = None
+                            self._rec_walk(path=path, parent_fd=parent_fd, name=name,
+                                           fso=fso, cache=cache, matcher=matcher,
+                                           exclude_caches=args.exclude_caches, exclude_if_present=args.exclude_if_present,
+                                           keep_exclude_tags=args.keep_exclude_tags, skip_inodes=skip_inodes,
+                                           restrict_dev=restrict_dev, read_special=args.read_special, dry_run=dry_run)
+                            # if we get back here, we've finished recursing into <path>,
+                            # we do not ever want to get back in there (even if path is given twice as recursion root)
+                            skip_inodes.add((st.st_ino, st.st_dev))
+                    except (BackupOSError, BackupError) as e:
+                        # this comes from OsOpen, self._rec_walk has own exception handler
+                        self.print_warning('%s: %s', path, e)
+                        continue
             if not dry_run:
                 if args.progress:
                     archive.stats.show_progress(final=True)
@@ -1191,7 +1180,7 @@ class Archiver:
                     current_archive = manifest.archives.pop(archive_name)
                 except KeyError:
                     self.exit_code = EXIT_WARNING
-                    logger.warning('Archive {} not found ({}/{}).'.format(archive_name, i, len(archive_names)))
+                    logger.warning(f'Archive {archive_name} not found ({i}/{len(archive_names)}).')
                 else:
                     deleted = True
                     if self.output_list:
@@ -1851,12 +1840,12 @@ class Archiver:
                     value = default_values.get(key)
                     if value is None:
                         raise Error('The repository config is missing the %s key which has no default value' % key)
-                print('%s = %s' % (key, value))
+                print(f'{key} = {value}')
             for key in ['last_segment_checked', ]:
                 value = config.get('repository', key, fallback=None)
                 if value is None:
                     continue
-                print('%s = %s' % (key, value))
+                print(f'{key} = {value}')
 
         if not args.list:
             if args.name is None:
@@ -2059,8 +2048,8 @@ class Archiver:
         def print_finding(info, wanted, data, offset):
             before = data[offset - context:offset]
             after = data[offset + len(wanted):offset + len(wanted) + context]
-            print('%s: %s %s %s == %r %r %r' % (info, before.hex(), wanted.hex(), after.hex(),
-                                                before, wanted, after))
+            print('{}: {} {} {} == {!r} {!r} {!r}'.format(info, before.hex(), wanted.hex(), after.hex(),
+                                                          before, wanted, after))
 
         wanted = args.wanted
         try:
@@ -2233,6 +2222,11 @@ class Archiver:
         store all files as `some/path/.../file.ext` and ``borg create
         /path/to/repo /home/user`` will store all files as
         `home/user/.../file.ext`.
+
+        A directory exclusion pattern can end either with or without a slash ('/').
+        If it ends with a slash, such as `some/path/`, the directory will be
+        included but not its content. If it does not end with a slash, such as
+        `some/path`, both the directory and content will be excluded.
 
         File patterns support these styles: fnmatch, shell, regular expressions,
         path prefixes and path full-matches. By default, fnmatch is used for
@@ -2452,11 +2446,11 @@ class Archiver:
 
         {now}
             The current local date and time, by default in ISO-8601 format.
-            You can also supply your own `format string <https://docs.python.org/3.5/library/datetime.html#strftime-and-strptime-behavior>`_, e.g. {now:%Y-%m-%d_%H:%M:%S}
+            You can also supply your own `format string <https://docs.python.org/3.9/library/datetime.html#strftime-and-strptime-behavior>`_, e.g. {now:%Y-%m-%d_%H:%M:%S}
 
         {utcnow}
             The current UTC date and time, by default in ISO-8601 format.
-            You can also supply your own `format string <https://docs.python.org/3.5/library/datetime.html#strftime-and-strptime-behavior>`_, e.g. {utcnow:%Y-%m-%d_%H:%M:%S}
+            You can also supply your own `format string <https://docs.python.org/3.9/library/datetime.html#strftime-and-strptime-behavior>`_, e.g. {utcnow:%Y-%m-%d_%H:%M:%S}
 
         {user}
             The user name (or UID, if no name is available) of the user running borg.
@@ -2762,6 +2756,10 @@ class Archiver:
             'a_status_oddity': '"I am seeing ‘A’ (added) status for a unchanged file!?"',
             'separate_compaction': '"Separate compaction"',
             'list_item_flags': '"Item flags"',
+            'borg_patterns': '"borg help patterns"',
+            'borg_placeholders': '"borg help placeholders"',
+            'key_files': 'Internals -> Data structures and file formats -> Key files',
+            'borg_key_export': 'borg key export --help',
         }
 
         def process_epilog(epilog):
@@ -3328,16 +3326,15 @@ class Archiver:
         the state after creation. Also, the ``--stats`` and ``--dry-run`` options are mutually
         exclusive because the data is not actually compressed and deduplicated during a dry run.
 
-        See the output of the "borg help patterns" command for more help on exclude patterns.
+        For more help on include/exclude patterns, see the :ref:`borg_patterns` command output.
 
-        See the output of the "borg help placeholders" command for more help on placeholders.
+        For more help on placeholders, see the :ref:`borg_placeholders` command output.
 
         .. man NOTES
 
         The ``--exclude`` patterns are not like tar. In tar ``--exclude`` .bundler/gems will
         exclude foo/.bundler/gems. In borg it will not, you need to use ``--exclude``
-        '\\*/.bundler/gems' to get the same effect. See ``borg help patterns`` for
-        more information.
+        '\\*/.bundler/gems' to get the same effect.
 
         In addition to using ``--exclude`` patterns, it is possible to use
         ``--exclude-if-present`` to specify the name of a filesystem object (e.g. a file
@@ -3756,7 +3753,7 @@ class Archiver:
         You can delete multiple archives by specifying their common prefix, if they
         have one, using the ``--prefix PREFIX`` option. You can also specify a shell
         pattern to match multiple archives using the ``--glob-archives GLOB`` option
-        (for more info on these patterns, see ``borg help patterns``). Note that these
+        (for more info on these patterns, see :ref:`borg_patterns`). Note that these
         two options are mutually exclusive.
 
         To avoid accidentally deleting archives, especially when using glob patterns,
@@ -3808,7 +3805,7 @@ class Archiver:
             pass ``--same-chunker-params``.
             Note that the chunker params changed from Borg 0.xx to 1.0.
 
-            See the output of the "borg help patterns" command for more help on exclude patterns.
+            For more help on include/exclude patterns, see the :ref:`borg_patterns` command output.
             """)
         subparser = subparsers.add_parser('diff', parents=[common_parser], add_help=False,
                                           description=self.do_diff.__doc__,
@@ -3869,7 +3866,7 @@ class Archiver:
         can be selected by passing a list of ``PATHs`` as arguments.
         The file selection can further be restricted by using the ``--exclude`` option.
 
-        See the output of the "borg help patterns" command for more help on exclude patterns.
+        For more help on include/exclude patterns, see the :ref:`borg_patterns` command output.
 
         ``--progress`` can be slower than no progress display, since it makes one additional
         pass over the archive metadata.
@@ -3900,7 +3897,7 @@ class Archiver:
         by passing a list of ``PATHs`` as arguments. The file selection can further
         be restricted by using the ``--exclude`` option.
 
-        See the output of the "borg help patterns" command for more help on exclude patterns.
+        For more help on include/exclude patterns, see the :ref:`borg_patterns` command output.
 
         By using ``--dry-run``, you can do all extraction steps except actually writing the
         output data: reading metadata and data chunks from the repo, checking the hash/hmac,
@@ -3996,31 +3993,41 @@ class Archiver:
         This command initializes an empty repository. A repository is a filesystem
         directory containing the deduplicated data from zero or more archives.
 
-        Encryption can be enabled at repository init time. It cannot be changed later.
+        Encryption mode TLDR
+        ++++++++++++++++++++
 
-        It is not recommended to work without encryption. Repository encryption protects
-        you e.g. against the case that an attacker has access to your backup repository.
+        The encryption mode can only be configured when creating a new repository -
+        you can neither configure it on a per-archive basis nor change the
+        encryption mode of an existing repository.
 
-        Borg relies on randomly generated key material and uses that for chunking, id
-        generation, encryption and authentication. The key material is encrypted using
-        the passphrase you give before it is stored on-disk.
+        Use ``repokey``::
 
-        You need to be careful with the key / the passphrase:
+            borg init --encryption repokey /path/to/repo
 
-        If you want "passphrase-only" security, use one of the repokey modes. The
-        key will be stored inside the repository (in its "config" file). In above
-        mentioned attack scenario, the attacker will have the key (but not the
-        passphrase).
+        Or ``repokey-blake2`` depending on which is faster on your client machines (see below)::
 
-        If you want "passphrase and having-the-key" security, use one of the keyfile
-        modes. The key will be stored in your home directory (in .config/borg/keys).
-        In the attack scenario, the attacker who has just access to your repo won't
-        have the key (and also not the passphrase).
+            borg init --encryption repokey-blake2 /path/to/repo
 
-        Make a backup copy of the key file (keyfile mode) or repo config file
-        (repokey mode) and keep it at a safe place, so you still have the key in
-        case it gets corrupted or lost. Also keep the passphrase at a safe place.
-        The backup that is encrypted with that key won't help you with that, of course.
+        Borg will:
+
+        1. Ask you to come up with a passphrase.
+        2. Create a borg key (which contains 3 random secrets. See :ref:`key_files`).
+        3. Encrypt the key with your passphrase.
+        4. Store the encrypted borg key inside the repository directory (in the repo config).
+           This is why it is essential to use a secure passphrase.
+        5. Encrypt and sign your backups to prevent anyone from reading or forging them unless they
+           have the key and know the passphrase. Make sure to keep a backup of
+           your key **outside** the repository - do not lock yourself out by
+           "leaving your keys inside your car" (see :ref:`borg_key_export`).
+           For remote backups the encryption is done locally - the remote machine
+           never sees your passphrase, your unencrypted key or your unencrypted files.
+           Chunking and id generation are also based on your key to improve
+           your privacy.
+        6. Use the key when extracting files to decrypt them and to verify that the contents of
+           the backups have not been accidentally or maliciously altered.
+
+        Picking a passphrase
+        ++++++++++++++++++++
 
         Make sure you use a good passphrase. Not too short, not too simple. The real
         encryption / decryption key is encrypted with / locked by your passphrase.
@@ -4040,14 +4047,22 @@ class Archiver:
         You can change your passphrase for existing repos at any time, it won't affect
         the encryption/decryption key or other secrets.
 
-        Encryption modes
-        ++++++++++++++++
+        More encryption modes
+        +++++++++++++++++++++
 
-        You can choose from the encryption modes seen in the table below on a per-repo
-        basis. The mode determines encryption algorithm, hash/MAC algorithm and also the
-        key storage location.
+        Only use ``--encryption none`` if you are OK with anyone who has access to
+        your repository being able to read your backups and tamper with their
+        contents without you noticing.
 
-        Example: `borg init --encryption repokey ...`
+        If you want "passphrase and having-the-key" security, use ``--encryption keyfile``.
+        The key will be stored in your home directory (in ``~/.config/borg/keys``).
+
+        If you do **not** want to encrypt the contents of your backups, but still
+        want to detect malicious tampering use ``--encryption authenticated``.
+
+        If ``BLAKE2b`` is faster than ``SHA-256`` on your hardware, use ``--encryption authenticated-blake2``,
+        ``--encryption repokey-blake2`` or ``--encryption keyfile-blake2``. Note: for remote backups
+        the hashing is done on your local machine.
 
         .. nanorst: inline-fill
 
@@ -4235,38 +4250,11 @@ class Archiver:
         subparser.add_argument('location', metavar='REPOSITORY', nargs='?', default='',
                                type=location_validator(archive=False))
 
-        migrate_to_repokey_epilog = process_epilog("""
-        This command migrates a repository from passphrase mode (removed in Borg 1.0)
-        to repokey mode.
-
-        You will be first asked for the repository passphrase (to open it in passphrase
-        mode). This is the same passphrase as you used to use for this repo before 1.0.
-
-        It will then derive the different secrets from this passphrase.
-
-        Then you will be asked for a new passphrase (twice, for safety). This
-        passphrase will be used to protect the repokey (which contains these same
-        secrets in encrypted form). You may use the same passphrase as you used to
-        use, but you may also use a different one.
-
-        After migrating to repokey mode, you can change the passphrase at any time.
-        But please note: the secrets will always stay the same and they could always
-        be derived from your (old) passphrase-mode passphrase.
-        """)
-        subparser = key_parsers.add_parser('migrate-to-repokey', parents=[common_parser], add_help=False,
-                                          description=self.do_migrate_to_repokey.__doc__,
-                                          epilog=migrate_to_repokey_epilog,
-                                          formatter_class=argparse.RawDescriptionHelpFormatter,
-                                          help='migrate passphrase-mode repository to repokey')
-        subparser.set_defaults(func=self.do_migrate_to_repokey)
-        subparser.add_argument('location', metavar='REPOSITORY', nargs='?', default='',
-                               type=location_validator(archive=False))
-
         # borg list
         list_epilog = process_epilog("""
         This command lists the contents of a repository or an archive.
 
-        See the "borg help patterns" command for more help on exclude patterns.
+        For more help on include/exclude patterns, see the :ref:`borg_patterns` command output.
 
         .. man NOTES
 
@@ -4274,7 +4262,7 @@ class Archiver:
         +++++++++++++++++++++++++++
 
         The ``--format`` option uses python's `format string syntax
-        <https://docs.python.org/3.8/library/string.html#formatstrings>`_.
+        <https://docs.python.org/3.9/library/string.html#formatstrings>`_.
 
         Examples:
         ::
@@ -5006,7 +4994,7 @@ def sig_info_handler(sig_no, stack):  # pragma: no cover
                     total = loc['st'].st_size
                 except Exception:
                     pos, total = 0, 0
-                logger.info("{0} {1}/{2}".format(path, format_file_size(pos), format_file_size(total)))
+                logger.info(f"{path} {format_file_size(pos)}/{format_file_size(total)}")
                 break
             if func in ('extract_item', ):  # extract op
                 path = loc['item'].path
@@ -5014,7 +5002,7 @@ def sig_info_handler(sig_no, stack):  # pragma: no cover
                     pos = loc['fd'].tell()
                 except Exception:
                     pos = 0
-                logger.info("{0} {1}/???".format(path, format_file_size(pos)))
+                logger.info(f"{path} {format_file_size(pos)}/???")
                 break
 
 
@@ -5052,7 +5040,7 @@ def main():  # pragma: no cover
         except Error as e:
             msg = e.get_message()
             tb_log_level = logging.ERROR if e.traceback else logging.DEBUG
-            tb = '%s\n%s' % (traceback.format_exc(), sysinfo())
+            tb = f'{traceback.format_exc()}\n{sysinfo()}'
             # we might not have logging setup yet, so get out quickly
             print(msg, file=sys.stderr)
             if tb_log_level == logging.ERROR:
@@ -5065,7 +5053,7 @@ def main():  # pragma: no cover
             msg = e.get_message()
             msgid = type(e).__qualname__
             tb_log_level = logging.ERROR if e.traceback else logging.DEBUG
-            tb = "%s\n%s" % (traceback.format_exc(), sysinfo())
+            tb = f"{traceback.format_exc()}\n{sysinfo()}"
             exit_code = e.exit_code
         except RemoteRepository.RPCError as e:
             important = e.exception_class not in ('LockTimeout', ) and e.traceback
@@ -5082,18 +5070,18 @@ def main():  # pragma: no cover
             msg = 'Local Exception'
             msgid = 'Exception'
             tb_log_level = logging.ERROR
-            tb = '%s\n%s' % (traceback.format_exc(), sysinfo())
+            tb = f'{traceback.format_exc()}\n{sysinfo()}'
             exit_code = EXIT_ERROR
         except KeyboardInterrupt:
             msg = 'Keyboard interrupt'
             tb_log_level = logging.DEBUG
-            tb = '%s\n%s' % (traceback.format_exc(), sysinfo())
+            tb = f'{traceback.format_exc()}\n{sysinfo()}'
             exit_code = EXIT_SIGNAL_BASE + 2
         except SigTerm:
             msg = 'Received SIGTERM'
             msgid = 'Signal.SIGTERM'
             tb_log_level = logging.DEBUG
-            tb = '%s\n%s' % (traceback.format_exc(), sysinfo())
+            tb = f'{traceback.format_exc()}\n{sysinfo()}'
             exit_code = EXIT_SIGNAL_BASE + 15
         except SigHup:
             msg = 'Received SIGHUP.'

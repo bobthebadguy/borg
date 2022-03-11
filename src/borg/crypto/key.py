@@ -1,5 +1,6 @@
 import configparser
 import getpass
+import hmac
 import os
 import shlex
 import sys
@@ -7,7 +8,6 @@ import textwrap
 import subprocess
 from binascii import a2b_base64, b2a_base64, hexlify
 from hashlib import sha256, sha512, pbkdf2_hmac
-from hmac import HMAC, compare_digest
 
 from ..logger import create_logger
 
@@ -119,9 +119,7 @@ def key_argument_names():
 def identify_key(manifest_data):
     key_type = manifest_data[0]
     if key_type == PassphraseKey.TYPE:
-        # we just dispatch to repokey mode and assume the passphrase was migrated to a repokey.
-        # see also comment in PassphraseKey class.
-        return RepoKey
+        return RepoKey  # see comment in PassphraseKey class.
 
     for key in AVAILABLE_KEY_TYPES:
         if key.TYPE == key_type:
@@ -193,7 +191,7 @@ class KeyBase:
     def assert_id(self, id, data):
         if id:
             id_computed = self.id_hash(data)
-            if not compare_digest(id_computed, id):
+            if not hmac.compare_digest(id_computed, id):
                 raise IntegrityError('Chunk %s: id verification failed' % bin_to_hex(id))
 
     def _tam_key(self, salt, context):
@@ -213,7 +211,7 @@ class KeyBase:
         })
         packed = msgpack.packb(metadata_dict)
         tam_key = self._tam_key(tam['salt'], context)
-        tam['hmac'] = HMAC(tam_key, packed, sha512).digest()
+        tam['hmac'] = hmac.digest(tam_key, packed, 'sha512')
         return msgpack.packb(metadata_dict)
 
     def unpack_and_verify_manifest(self, data, force_tam_not_required=False):
@@ -252,8 +250,8 @@ class KeyBase:
         offset = data.index(tam_hmac)
         data[offset:offset + 64] = bytes(64)
         tam_key = self._tam_key(tam_salt, context=b'manifest')
-        calculated_hmac = HMAC(tam_key, data, sha512).digest()
-        if not compare_digest(calculated_hmac, tam_hmac):
+        calculated_hmac = hmac.digest(tam_key, data, 'sha512')
+        if not hmac.compare_digest(calculated_hmac, tam_hmac):
             raise TAMInvalid()
         logger.debug('TAM-verified manifest')
         return unpacked, True
@@ -327,8 +325,7 @@ class ID_BLAKE2b_256:
     def id_hash(self, data):
         return blake2b_256(self.id_key, data)
 
-    def init_from_random_data(self, data=None):
-        assert data is None  # PassphraseKey is the only caller using *data*
+    def init_from_random_data(self):
         super().init_from_random_data()
         self.enc_hmac_key = random_blake2b_256_key()
         self.id_key = random_blake2b_256_key()
@@ -347,8 +344,6 @@ class ID_HMAC_SHA_256:
 
 class AESKeyBase(KeyBase):
     """
-    Common base class shared by KeyfileKey and PassphraseKey
-
     Chunks are encrypted using 256bit AES in Counter Mode (CTR)
 
     Payload layout: TYPE(1) + HMAC(32) + NONCE(8) + CIPHERTEXT
@@ -379,16 +374,15 @@ class AESKeyBase(KeyBase):
         try:
             payload = self.cipher.decrypt(data)
         except IntegrityError as e:
-            raise IntegrityError("Chunk %s: Could not decrypt [%s]" % (bin_to_hex(id), str(e)))
+            raise IntegrityError(f"Chunk {bin_to_hex(id)}: Could not decrypt [{str(e)}]")
         if not decompress:
             return payload
         data = self.decompress(payload)
         self.assert_id(id, data)
         return data
 
-    def init_from_random_data(self, data=None):
-        if data is None:
-            data = os.urandom(100)
+    def init_from_random_data(self):
+        data = os.urandom(100)
         self.enc_key = data[0:32]
         self.enc_hmac_key = data[32:64]
         self.id_key = data[64:96]
@@ -469,7 +463,7 @@ class Passphrase(str):
             msg = []
             for env_var in 'BORG_PASSPHRASE', 'BORG_PASSCOMMAND':
                 env_var_set = os.environ.get(env_var) is not None
-                msg.append('%s is %s.' % (env_var, 'set' if env_var_set else 'not set'))
+                msg.append('{} is {}.'.format(env_var, 'set' if env_var_set else 'not set'))
             msg.append('Interactive password query failed.')
             raise NoPassphraseFailure(' '.join(msg)) from None
         else:
@@ -523,59 +517,13 @@ class Passphrase(str):
         return pbkdf2_hmac('sha256', self.encode('utf-8'), salt, iterations, length)
 
 
-class PassphraseKey(ID_HMAC_SHA_256, AESKeyBase):
-    # This mode was killed in borg 1.0, see: https://github.com/borgbackup/borg/issues/97
-    # Reasons:
-    # - you can never ever change your passphrase for existing repos.
-    # - you can never ever use a different iterations count for existing repos.
-    # "Killed" means:
-    # - there is no automatic dispatch to this class via type byte
-    # - --encryption=passphrase is an invalid argument now
-    # This class is kept for a while to support migration from passphrase to repokey mode.
+class PassphraseKey:
+    # this is only a stub, repos with this mode could not be created any more since borg 1.0, see #97.
+    # in borg 1.3 all of its code and also the "borg key migrate-to-repokey" command was removed.
+    # if you still need to, you can use "borg key migrate-to-repokey" with borg 1.0, 1.1 and 1.2.
+    # Nowadays, we just dispatch this to RepoKey and assume the passphrase was migrated to a repokey.
     TYPE = 0x01
     NAME = 'passphrase'
-    ARG_NAME = None
-    STORAGE = KeyBlobStorage.NO_STORAGE
-
-    iterations = 100000  # must not be changed ever!
-
-    @classmethod
-    def create(cls, repository, args):
-        key = cls(repository)
-        logger.warning('WARNING: "passphrase" mode is unsupported since borg 1.0.')
-        passphrase = Passphrase.new(allow_empty=False)
-        key.init(repository, passphrase)
-        return key
-
-    @classmethod
-    def detect(cls, repository, manifest_data):
-        prompt = 'Enter passphrase for %s: ' % repository._location.canonical_path()
-        key = cls(repository)
-        passphrase = Passphrase.env_passphrase()
-        if passphrase is None:
-            passphrase = Passphrase.getpass(prompt)
-        for retry in range(1, 3):
-            key.init(repository, passphrase)
-            try:
-                key.decrypt(None, manifest_data)
-                key.init_ciphers(manifest_data)
-                key._passphrase = passphrase
-                return key
-            except IntegrityError:
-                passphrase = Passphrase.getpass(prompt)
-        else:
-            raise PasswordRetriesExceeded
-
-    def change_passphrase(self):
-        class ImmutablePassphraseError(Error):
-            """The passphrase for this encryption key type can't be changed."""
-
-        raise ImmutablePassphraseError
-
-    def init(self, repository, passphrase):
-        self.init_from_random_data(passphrase.kdf(repository.id, self.iterations, 100))
-        self.init_ciphers()
-        self.tam_required = False
 
 
 class KeyfileKeyBase(AESKeyBase):
@@ -760,7 +708,7 @@ class KeyfileKey(ID_HMAC_SHA_256, KeyfileKeyBase):
         return path
 
     def load(self, target, passphrase):
-        with open(target, 'r') as fd:
+        with open(target) as fd:
             key_data = ''.join(fd.readlines()[1:])
         success = self._load(key_data, passphrase)
         if success:
@@ -775,7 +723,7 @@ class KeyfileKey(ID_HMAC_SHA_256, KeyfileKeyBase):
             raise Error('Aborting because key in "%s" already exists.' % target)
         key_data = self._save(passphrase)
         with SaveFile(target) as fd:
-            fd.write('%s %s\n' % (self.FILE_ID, bin_to_hex(self.repository_id)))
+            fd.write(f'{self.FILE_ID} {bin_to_hex(self.repository_id)}\n')
             fd.write(key_data)
             fd.write('\n')
         self.target = target
@@ -888,7 +836,6 @@ class Blake2AuthenticatedKey(ID_BLAKE2b_256, AuthenticatedKeyBase):
 
 AVAILABLE_KEY_TYPES = (
     PlaintextKey,
-    PassphraseKey,
     KeyfileKey, RepoKey, AuthenticatedKey,
     Blake2KeyfileKey, Blake2RepoKey, Blake2AuthenticatedKey,
 )

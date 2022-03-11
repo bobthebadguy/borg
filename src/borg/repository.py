@@ -18,7 +18,7 @@ from .helpers import Error, ErrorWithTraceback, IntegrityError, format_file_size
 from .helpers import Location
 from .helpers import ProgressIndicatorPercent
 from .helpers import bin_to_hex
-from .helpers import secure_erase, truncate_and_unlink
+from .helpers import secure_erase, safe_unlink
 from .helpers import Manifest
 from .helpers import msgpack
 from .locking import Lock, LockError, LockErrorT
@@ -190,7 +190,7 @@ class Repository:
             assert False, "cleanup happened in Repository.__del__"
 
     def __repr__(self):
-        return '<%s %s>' % (self.__class__.__name__, self.path)
+        return f'<{self.__class__.__name__} {self.path}>'
 
     def __enter__(self):
         if self.do_create:
@@ -347,7 +347,7 @@ class Repository:
 
         nonce_path = os.path.join(self.path, 'nonce')
         try:
-            with open(nonce_path, 'r') as fd:
+            with open(nonce_path) as fd:
                 return int.from_bytes(unhexlify(fd.read()), byteorder='big')
         except FileNotFoundError:
             return None
@@ -716,7 +716,7 @@ class Repository:
         except OSError as os_error:
             logger.warning('Failed to check free space before committing: ' + str(os_error))
             return
-        logger.debug('check_free_space: required bytes {}, free bytes {}'.format(required_free_space, free_space))
+        logger.debug(f'check_free_space: required bytes {required_free_space}, free bytes {free_space}')
         if free_space < required_free_space:
             if self.created:
                 logger.error('Not enough free space to initialize repository at this location.')
@@ -738,7 +738,7 @@ class Repository:
         if not self.compact:
             logger.debug('nothing to do: compact empty')
             return
-        freed_space = 0
+        quota_use_before = self.storage_quota_use
         index_transaction_id = self.get_index_transaction_id()
         segments = self.segments
         unused = []  # list of segments, that are not used anymore
@@ -774,13 +774,12 @@ class Repository:
             # we want to compact if:
             # - we can free a considerable relative amount of space (freeable_ratio over some threshold)
             if not (freeable_ratio > threshold):
-                logger.debug('not compacting segment %d (freeable: %2.2f%% [%d bytes])',
+                logger.debug('not compacting segment %d (maybe freeable: %2.2f%% [%d bytes])',
                              segment, freeable_ratio * 100.0, freeable_space)
                 pi.show()
                 continue
-            freed_space += freeable_space  # this is what we THINK we can free
             segments.setdefault(segment, 0)
-            logger.debug('compacting segment %d with usage count %d (freeable: %2.2f%% [%d bytes])',
+            logger.debug('compacting segment %d with usage count %d (maybe freeable: %2.2f%% [%d bytes])',
                          segment, segments[segment], freeable_ratio * 100.0, freeable_space)
             for tag, key, offset, data in self.io.iter_objects(segment, include_data=True):
                 if tag == TAG_COMMIT:
@@ -867,7 +866,8 @@ class Repository:
             pi.show()
         pi.finish()
         complete_xfer(intermediate=False)
-        logger.info('compaction freed about %s repository space.', format_file_size(freed_space))
+        quota_use_after = self.storage_quota_use
+        logger.info('compaction freed about %s repository space.', format_file_size(quota_use_before - quota_use_after))
         logger.debug('compaction completed.')
 
     def replay_segments(self, index_transaction_id, segments_transaction_id):
@@ -924,7 +924,7 @@ class Repository:
             elif tag == TAG_COMMIT:
                 continue
             else:
-                msg = 'Unexpected tag {} in segment {}'.format(tag, segment)
+                msg = f'Unexpected tag {tag} in segment {segment}'
                 if report is None:
                     raise self.CheckNeeded(msg)
                 else:
@@ -1045,7 +1045,7 @@ class Repository:
         # self.index, self.segments, self.compact now reflect the state of the segment files up to <transaction_id>
         # We might need to add a commit tag if no committed segment is found
         if repair and segments_transaction_id is None:
-            report_error('Adding commit tag to segment {}'.format(transaction_id))
+            report_error(f'Adding commit tag to segment {transaction_id}')
             self.io.segment = transaction_id + 1
             self.io.write_commit()
         if not partial:
@@ -1342,7 +1342,7 @@ class LoggedIO:
             if segment > transaction_id:
                 if segment in self.fds:
                     del self.fds[segment]
-                truncate_and_unlink(filename)
+                safe_unlink(filename)
                 count += 1
             else:
                 break
@@ -1450,7 +1450,7 @@ class LoggedIO:
         if segment in self.fds:
             del self.fds[segment]
         try:
-            truncate_and_unlink(self.segment_filename(segment))
+            safe_unlink(self.segment_filename(segment))
         except FileNotFoundError:
             pass
 
@@ -1484,7 +1484,7 @@ class LoggedIO:
             # Repository.scan() calls us with segment > 0 when it continues an ongoing iteration
             # from a marker position - but then we have checked the magic before already.
             if fd.read(MAGIC_LEN) != MAGIC:
-                raise IntegrityError('Invalid segment magic [segment {}, offset {}]'.format(segment, 0))
+                raise IntegrityError(f'Invalid segment magic [segment {segment}, offset {0}]')
             offset = MAGIC_LEN
         header = fd.read(self.header_fmt.size)
         while header:
@@ -1613,7 +1613,7 @@ class LoggedIO:
         data_size = len(data)
         if data_size > MAX_DATA_SIZE:
             # this would push the segment entry size beyond MAX_OBJECT_SIZE.
-            raise IntegrityError('More than allowed put data [{} > {}]'.format(data_size, MAX_DATA_SIZE))
+            raise IntegrityError(f'More than allowed put data [{data_size} > {MAX_DATA_SIZE}]')
         fd = self.get_write_fd(want_new=(id == Manifest.MANIFEST_ID), raise_full=raise_full)
         size = data_size + self.put_header_fmt.size
         offset = self.offset
